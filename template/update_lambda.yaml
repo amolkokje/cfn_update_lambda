@@ -1,11 +1,12 @@
 AWSTemplateFormatVersion: '2010-09-09'
-Description: 'my-test-deployment'
+Description: 'my-lambda-update-template'
 
 Parameters:
+
   LambdaSourceBucket:
     Description: AWS S3 Bucket in the Region which contains the Lambda Functions
     Type: String
-    Default: elasticsearch-lambda-functions
+    Default: lambda-function-staging-bucket
     ConstraintDescription: Must be a valid bucket name containing Lambda functions, and in the same region.
 
   LambdaSourceBucketPrefix:
@@ -14,17 +15,11 @@ Parameters:
     Default: ''
     ConstraintDescription: Bucket prefix that contains the lambda functions.
 
-  LambdaSourcePackageName:
-      Description: File name in the S3 bucket
-      Type: String
-      Default: 'index_data.zip'
-      ConstraintDescription: code package file name
-
-  LambdaSourcePackageVersion:
-        Description: Version string of lambda pacakge code zip in s3 bucket
-        Type: String
-        Default: '29fnfJLdIwmiRBFN388UjGdh.ScwBwqP'
-        ConstraintDescription: code package file version string
+  LambdaFunctionPackage:
+    Description: Lambda function pacakge name
+    Type: String
+    Default: ''
+    ConstraintDescription: Valid Lambda function package name deployed in the staging bucket.
 
 
 Resources:
@@ -33,12 +28,8 @@ Resources:
   LambdaZipsBucket:
     Type: AWS::S3::Bucket
 
-  #######################################################
-  ### Custom resource to deploy lambda function from code package in s3
-  #######################################################
 
   # Custom Resource: Used to copy all specified lambda zip packages in the 'Objects' list to the LambdaZipsBucket
-  # Specify Versions and Objects in the same order. The object version ID is available from s3
   CopyZips:
     Type: Custom::CopyZips
     Properties:
@@ -46,10 +37,9 @@ Resources:
       DestBucket: !Ref 'LambdaZipsBucket'
       SourceBucket: !Ref 'LambdaSourceBucket'
       Prefix: !Ref 'LambdaSourceBucketPrefix'
-      Versions:
-        - !Ref 'LambdaSourcePackageVersion'
       Objects:
-        - !Ref 'LambdaSourcePackageName'
+        - !Ref 'LambdaFunctionPackage'
+
 
   CopyZipsFunctionRole:
     Type: AWS::IAM::Role
@@ -82,8 +72,7 @@ Resources:
                   - !Sub 'arn:aws:s3:::${LambdaZipsBucket}/${LambdaSourceBucketPrefix}*'
 
 
-  # Lambda function used by the Custom-Resource CopyZips to copy over the lambda functions to bucket used by stack
-  # to create the lambda functions
+  # Lambda function used by the Custom-Resource CopyZips to copy over the lambda functions
   CopyZipsFunction:
     Type: AWS::Lambda::Function
     Properties:
@@ -104,31 +93,58 @@ Resources:
           logger.setLevel(logging.INFO)
           s3 = boto3.client('s3')
 
-          def copy_objects(source_bucket, dest_bucket, prefix, object_dict):
-              for item, version in object_dict.iteritems():
+          def copy_objects(source_bucket, dest_bucket, prefix, objects):
+              """
+              Copy specified objects from source to destination bucket
+              :param source_bucket: source bucket name
+              :param dest_bucket: destination bucket name
+              :param prefix: source bucket prefix
+              :param objects: list of objects to copy
+              :return: None
+              """
+              for item in objects:
                   key = prefix + item
                   copy_source = {
-                      'CopySource': '/{}/{}?versionId={}'.format(source_bucket, key, version),
+                      'CopySource': '/{}/{}'.format(source_bucket, key),
                       'Bucket': source_bucket,
                       'Key': key
                   }
                   logger.info('copy_source: [{}]'.format(copy_source))
                   logger.info('dest_bucket: [{}]'.format(dest_bucket))
-                  logger.info('key: [{}], version: [{}]'.format(key, version))
+                  logger.info('key: [{}]'.format(key))
                   s3.copy_object(CopySource=copy_source, Bucket=dest_bucket, Key=key)
 
 
           def delete_objects(bucket, prefix, objects):
+              """
+              Delete specified s3 objects
+              :param bucket: bucket name
+              :param prefix: bucket prefix
+              :param objects: list of object names
+              :return None
+              """
               objects = {'Objects': [{'Key': prefix + item} for item in objects]}
               s3.delete_objects(Bucket=bucket, Delete=objects)
 
 
           def timeout_handler(event, context):
+              """
+              Timeout handling
+              :param event: lambda function event
+              :param context: lambda function context
+              :return None
+              """
               logger.error('Execution is about to time out, sending failure response to CloudFormation')
               cfnresponse.send(event, context, cfnresponse.FAILED, {}, None)
 
 
           def handler(event, context):
+              """
+              Lambda function handler
+              :param event: lambda function event
+              :param context: lambda function context
+              :return None
+              """
               # make sure we send a failure to CloudFormation if the function
               # is going to timeout
               timer = threading.Timer((context.get_remaining_time_in_millis()
@@ -143,22 +159,14 @@ Resources:
                   dest_bucket = event['ResourceProperties']['DestBucket']
                   prefix = event['ResourceProperties']['Prefix']
                   objects = event['ResourceProperties']['Objects']
-                  versions = event['ResourceProperties']['Versions']
                   logging.info('SourceBucket=[{}], DestinationBucket=[{}], Prefix=[{}], \
-                                                        Objects=[{}], Versions=[{}]'.format(
-                                                        source_bucket, dest_bucket, prefix, objects, versions))
-
-                  object_count = len(objects)
-                  object_dict = dict()
-                  if object_count != len(versions):
-                      raise RuntimeError('"Objects" and "Versions" should have same length!')
-                  for i in range(object_count):
-                      object_dict[objects[i]] = versions[i]
+                                                        Objects=[{}]'.format(
+                                                        source_bucket, dest_bucket, prefix, objects))
 
                   if event['RequestType'] == 'Delete':
                       delete_objects(dest_bucket, prefix, objects)
                   else:
-                      copy_objects(source_bucket, dest_bucket, prefix, object_dict)
+                      copy_objects(source_bucket, dest_bucket, prefix, objects)
 
               except Exception as e:
                   logger.error('Exception: %s' % e, exc_info=True)
@@ -168,11 +176,9 @@ Resources:
                   timer.cancel()
                   cfnresponse.send(event, context, status, {}, None)
 
-  #######################################################
-  ### Lambda function
-  #######################################################
 
-  MyTestFunctionRole:
+  # Role for actual lambda functions to be deployed by the stack
+  MyLambdaFunctionRole:
     Type: AWS::IAM::Role
     Properties:
       AssumeRolePolicyDocument:
@@ -185,16 +191,17 @@ Resources:
       ManagedPolicyArns:
         - arn:aws:iam::aws:policy/AWSLambdaExecute
 
-  MyTestFunction:
+
+  # Lambda function deployed by the stack
+  MyLambdaFunction:
     DependsOn:
       - CopyZips
     Type: AWS::Lambda::Function
     Properties:
-      Description: !Ref 'LambdaSourcePackageVersion'
-      Handler: index_data.lambda_handler
+      Description: 'Lambda function to index data to ES when object is added to S3'
+      Handler: my_lambda.lambda_handler
       Runtime: python2.7
-      Role: !GetAtt 'MyTestFunctionRole.Arn'
-      Timeout: 300
+      Role: !GetAtt 'MyLambdaFunctionRole.Arn'
       Code:
         S3Bucket: !Ref 'LambdaZipsBucket'
-        S3Key: !Sub '${LambdaSourceBucketPrefix}index_data.zip'
+        S3Key: !Join [ '', [ !Ref LambdaSourceBucketPrefix, !Ref 'LambdaFunctionPackage' ] ]

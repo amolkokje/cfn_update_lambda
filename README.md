@@ -1,21 +1,27 @@
 # cfn_update_lambda
-Way to automatically update lambda functions deployed using CloudFormation, when there is a code change for the lambda package in S3 staging bucket
 
-In this architecture, the code package zip used for the lambda function is stored in a staging s3 bucket.
+Way to automatically update lambda functions deployed using CloudFormation, with new code or dependencies.
 
+CloudFormation stack only gets update when the service detects a change in properties of the resources defined in the template.
 
-1. Enable versioninig on the s3 staging bucket. Hence, whenever a new lambda code package is uploaded to s3,
-   the version ID changes.
+In this example, there is a CopyZips resource that copies the lambda package from the staging bucket to the stack bucket.
+Then, there is a Lambda function resource which uses that copied package to create the lambda function.
+So, we need to update these two resource in order for the stack to update the lambda function when we apply the CloudFormation Stack Update.
 
-2. Create a Cloudformation stack using the template file in this repo. It will ask you for the staging bucket name,
-   prefix, and also the version ID of the lambda package (you can get this from CLI or Console). Enter all of that.
+Here, the Lambda function is packaged and deployed to the staging bucket using SAM CLI, which generates a new package name.
+Follow the below steps in order to update your lambda function.
 
-3. During stack creation, the CopyZips custom resource will grab the s3 object with the specified version ID and create
-   the lambda function using that.
+1. Create the lambda package by executing the command "sam build --template lambda_template.yaml" in the /functions folder.
 
-4. Now, say you need to make changes to the lambda package code. You make changes and upload the new zip to the staging
-   bucket. This will update the version ID. Grab this version ID from s3 object.
+2. Upload the lambda pacakge to staging bucket using the command "sam package --s3-bucket lambda-function-staging-bucket".
+   NOTE: Steps 1 and 2 can be combined using command: "sam build --template lambda_template.yaml && sam package --s3-bucket lambda-function-staging-bucket"
 
-5. Apply an update to the Cloudformation Stack, with all parameters same, and only update the version ID. When CopyZips
-   resource property is updated, this will re-create/update the custom resource which will in-turn copy the specific
-   version bucket key from
+3. Get the package zip name from the previous step(will be some random string like 'ebc7764d8dd6df6cab4fc792c714087d').
+   On the CloudFormation console, click Update -> Select 'Use Current Template' -> Update the LambdaFunctionPackage string with the new package name.
+   Click on Next -> Next -> Update Stack.
+
+This will start the stack update process and correctly update the stack with new code/dependencies.
+
+This example is to demo a very simple deployment. But you may have a very complex stack with multiple lambda functions.
+In that case taking a stack input parameter may not be the best way to update the deployed function. You would have to
+figure out a way to update all the relevant strings, which can be achieved with several other CloudFormation tricks.
